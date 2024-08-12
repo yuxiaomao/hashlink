@@ -31,6 +31,8 @@ typedef int SOCKET;
 #include "mbedtls/oid.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/ssl.h"
+#include "mbedtls/ssl_cookie.h"
+#include "mbedtls/timing.h"
 
 #ifdef MBEDTLS_PSA_CRYPTO_C
 #include <psa/crypto.h>
@@ -66,6 +68,8 @@ struct _hl_ssl_pkey {
 #define TCONF _ABSTRACT(mbedtls_ssl_config)
 #define TCERT _ABSTRACT(hl_ssl_cert)
 #define TPKEY _ABSTRACT(hl_ssl_pkey)
+#define TCOOKIE _ABSTRACT(mbedtls_ssl_cookie_ctx)
+#define TTIMER _ABSTRACT(mbedtls_timing_delay_context)
 
 static bool ssl_init_done = false;
 static mbedtls_entropy_context entropy;
@@ -187,6 +191,15 @@ HL_PRIM hl_ssl_cert *HL_NAME(ssl_get_peer_certificate)(mbedtls_ssl_context *ssl)
 	return cert;
 }
 
+HL_PRIM void HL_NAME(ssl_set_timer)(mbedtls_ssl_context *ssl, mbedtls_timing_delay_context *timer) {
+	mbedtls_ssl_set_timer_cb(ssl, timer, mbedtls_timing_set_delay,mbedtls_timing_get_delay);
+}
+
+HL_PRIM int HL_NAME(ssl_set_client_transport_id)(mbedtls_ssl_context *ssl, const unsigned char *info, int len) {
+	int r = mbedtls_ssl_set_client_transport_id(ssl,info,len);
+	return r;
+}
+
 DEFINE_PRIM(TSSL, ssl_new, TCONF);
 DEFINE_PRIM(_VOID, ssl_close, TSSL);
 DEFINE_PRIM(_I32, ssl_handshake, TSSL);
@@ -194,6 +207,8 @@ DEFINE_PRIM(_VOID, ssl_set_bio, TSSL _DYN);
 DEFINE_PRIM(_VOID, ssl_set_socket, TSSL _SOCK);
 DEFINE_PRIM(_VOID, ssl_set_hostname, TSSL _BYTES);
 DEFINE_PRIM(TCERT, ssl_get_peer_certificate, TSSL);
+DEFINE_PRIM(_VOID, ssl_set_timer, TSSL TTIMER);
+DEFINE_PRIM(_I32, ssl_set_client_transport_id, TSSL _BYTES _I32);
 
 HL_PRIM int HL_NAME(ssl_send_char)(mbedtls_ssl_context *ssl, int c) {
 	unsigned char cc;
@@ -234,19 +249,30 @@ DEFINE_PRIM(_I32, ssl_send, TSSL _BYTES _I32 _I32);
 DEFINE_PRIM(_I32, ssl_recv_char, TSSL);
 DEFINE_PRIM(_I32, ssl_recv, TSSL _BYTES _I32 _I32);
 
-HL_PRIM mbedtls_ssl_config *HL_NAME(conf_new)(bool server) {
+mbedtls_ssl_config *conf_new_commun(bool server, bool udp) {
 	int ret;
 	mbedtls_ssl_config *conf;
 	conf = (mbedtls_ssl_config *)hl_gc_alloc_noptr(sizeof(mbedtls_ssl_config));
 	mbedtls_ssl_config_init(conf);
-	if ((ret = mbedtls_ssl_config_defaults(conf, server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
-		MBEDTLS_SSL_TRANSPORT_STREAM, 0)) != 0) {
+	if ((ret = mbedtls_ssl_config_defaults(conf,
+			server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
+			udp ? MBEDTLS_SSL_TRANSPORT_DATAGRAM : MBEDTLS_SSL_TRANSPORT_STREAM,
+			0)) != 0
+		) {
 		mbedtls_ssl_config_free(conf);
 		ssl_error(ret);
 		return NULL;
 	}
 	mbedtls_ssl_conf_rng(conf, mbedtls_ctr_drbg_random, &ctr_drbg);
 	return conf;
+}
+
+HL_PRIM mbedtls_ssl_config *HL_NAME(conf_new)(bool server) {
+	return conf_new_commun(server, false);
+}
+
+HL_PRIM mbedtls_ssl_config *HL_NAME(conf_new_dtls)(bool server) {
+	return conf_new_commun(server, true);
 }
 
 HL_PRIM void HL_NAME(conf_close)(mbedtls_ssl_config *conf) {
@@ -297,13 +323,18 @@ HL_PRIM void HL_NAME(conf_set_servername_callback)(mbedtls_ssl_config *conf, vcl
 	mbedtls_ssl_conf_sni(conf, sni_callback, (void *)cb);
 }
 
+HL_PRIM void HL_NAME(conf_set_dtls_cookie)(mbedtls_ssl_config *conf, mbedtls_ssl_cookie_ctx *cookie_ctx) {
+	mbedtls_ssl_conf_dtls_cookies(conf, mbedtls_ssl_cookie_write, mbedtls_ssl_cookie_check, cookie_ctx);
+}
 
 DEFINE_PRIM(TCONF, conf_new, _BOOL);
+DEFINE_PRIM(TCONF, conf_new_dtls, _BOOL);
 DEFINE_PRIM(_VOID, conf_close, TCONF);
 DEFINE_PRIM(_VOID, conf_set_ca, TCONF TCERT);
 DEFINE_PRIM(_VOID, conf_set_verify, TCONF _I32);
 DEFINE_PRIM(_VOID, conf_set_cert, TCONF TCERT TPKEY);
 DEFINE_PRIM(_VOID, conf_set_servername_callback, TCONF _FUN(_OBJ(TCERT TPKEY), _BYTES));
+DEFINE_PRIM(_VOID, conf_set_dtls_cookie, TCONF TCOOKIE);
 
 HL_PRIM hl_ssl_cert *HL_NAME(cert_load_file)(vbyte *file) {
 #ifdef HL_CONSOLE
@@ -719,6 +750,26 @@ DEFINE_PRIM(_BYTES, dgst_make, _BYTES _I32 _BYTES _REF(_I32));
 DEFINE_PRIM(_BYTES, dgst_sign, _BYTES _I32 TPKEY _BYTES _REF(_I32));
 DEFINE_PRIM(_BOOL, dgst_verify, _BYTES _I32 _BYTES _I32 TPKEY _BYTES);
 
+HL_PRIM mbedtls_ssl_cookie_ctx *HL_NAME(cookie_new)() {
+	mbedtls_ssl_cookie_ctx *cookie_ctx = hl_gc_alloc_noptr(sizeof(mbedtls_ssl_cookie_ctx));
+	mbedtls_ssl_cookie_init(cookie_ctx);
+	mbedtls_ssl_cookie_setup(cookie_ctx, mbedtls_ctr_drbg_random, &ctr_drbg);
+	return cookie_ctx;
+}
+
+HL_PRIM void HL_NAME(cookie_close)(mbedtls_ssl_cookie_ctx *cookie_ctx) {
+	mbedtls_ssl_cookie_free(cookie_ctx);
+}
+
+DEFINE_PRIM(TCOOKIE, cookie_new, _NO_ARG);
+DEFINE_PRIM(_VOID, cookie_close, TCOOKIE);
+
+HL_PRIM mbedtls_timing_delay_context *HL_NAME(timer_new)() {
+	mbedtls_timing_delay_context *timer = hl_gc_alloc_noptr(sizeof(mbedtls_timing_delay_context));
+	return timer;
+}
+
+DEFINE_PRIM(TTIMER, timer_new, _NO_ARG);
 
 #if _MSC_VER
 
