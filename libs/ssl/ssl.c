@@ -33,6 +33,9 @@ typedef int SOCKET;
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_cookie.h"
 #include "mbedtls/timing.h"
+#if SSL_DEBUG_LEVEL > 0
+#include "mbedtls/debug.h"
+#endif
 
 #ifdef MBEDTLS_PSA_CRYPTO_C
 #include <psa/crypto.h>
@@ -256,6 +259,24 @@ DEFINE_PRIM(_I32, ssl_send, TSSL _BYTES _I32 _I32);
 DEFINE_PRIM(_I32, ssl_recv_char, TSSL);
 DEFINE_PRIM(_I32, ssl_recv, TSSL _BYTES _I32 _I32);
 
+#if SSL_DEBUG_LEVEL > 0
+static void ssl_debug_print(void *ctx, int level, const char *file, int line, const char *str)
+{
+	const char *p, *basename;
+	(void) ctx;
+
+	/* Extract basename from file */
+	for(p = basename = file; *p != '\0'; p++) {
+		if(*p == '/' || *p == '\\') {
+			basename = p + 1;
+		}
+	}
+	char msg[512];
+	mbedtls_snprintf(msg, 512, "%s:%04d: |%d| %s", basename, line, level, str);
+	hl_sys_print(hl_to_utf16(msg));
+}
+#endif
+
 mbedtls_ssl_config *conf_new_commun(bool server, bool udp) {
 	int ret;
 	mbedtls_ssl_config *conf;
@@ -271,6 +292,10 @@ mbedtls_ssl_config *conf_new_commun(bool server, bool udp) {
 		return NULL;
 	}
 	mbedtls_ssl_conf_rng(conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+#if SSL_DEBUG_LEVEL > 0
+	mbedtls_ssl_conf_dbg(conf, ssl_debug_print, NULL);
+	mbedtls_debug_set_threshold(SSL_DEBUG_LEVEL);
+#endif
 	return conf;
 }
 
