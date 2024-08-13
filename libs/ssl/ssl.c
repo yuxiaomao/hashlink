@@ -54,6 +54,12 @@ typedef struct _hl_socket {
 	SOCKET sock;
 } hl_socket;
 
+// Udp socket context
+typedef struct _hl_udp_socket {
+	hl_socket sock;
+	struct sockaddr_in peer_addr;
+} hl_udp_socket;
+
 typedef struct _hl_ssl_cert hl_ssl_cert;
 struct _hl_ssl_cert {
 	void(*finalize)(hl_ssl_cert *);
@@ -67,6 +73,7 @@ struct _hl_ssl_pkey {
 };
 
 #define _SOCK	_ABSTRACT(hl_socket)
+#define _UDP_SOCK _ABSTRACT(hl_udp_socket)
 #define TSSL _ABSTRACT(mbedtls_ssl_context)
 #define TCONF _ABSTRACT(mbedtls_ssl_config)
 #define TCERT _ABSTRACT(hl_ssl_cert)
@@ -172,6 +179,28 @@ HL_PRIM void HL_NAME(ssl_set_socket)(mbedtls_ssl_context *ssl, hl_socket *socket
 	mbedtls_ssl_set_bio(ssl, (void*)(int_val)socket->sock, net_write, net_read, NULL);
 }
 
+static int net_udp_read(void *ctx, unsigned char *buf, size_t len) {
+	hl_udp_socket *socket = (hl_udp_socket *)ctx;
+	int alen = sizeof(socket->peer_addr);
+	int r = recvfrom((SOCKET)(int_val)socket->sock.sock, (char *)buf, (int)len, MSG_NOSIGNAL, (struct sockaddr*)&socket->peer_addr, &alen);
+	if( r == SOCKET_ERROR && is_block_error() )
+		return MBEDTLS_ERR_SSL_WANT_READ;
+	return r;
+}
+
+static int net_udp_write(void *ctx, const unsigned char *buf, size_t len) {
+	hl_udp_socket *socket = (hl_udp_socket *)ctx;
+	int alen = sizeof(socket->peer_addr);
+	int r = sendto((SOCKET)(int_val)socket->sock.sock, (char *)buf, (int)len, MSG_NOSIGNAL, (struct sockaddr*)&socket->peer_addr, alen);
+	if( r == SOCKET_ERROR && is_block_error() )
+		return MBEDTLS_ERR_SSL_WANT_WRITE;
+	return r;
+}
+
+HL_PRIM void HL_NAME(ssl_set_udp_socket)(mbedtls_ssl_context *ssl, hl_udp_socket *socket) {
+	mbedtls_ssl_set_bio(ssl, (void*)socket, net_udp_write, net_udp_read, NULL);
+}
+
 static int arr_read( void *arr, unsigned char *buf, size_t len ) {
 	int r = ((int (*)(vdynamic*,unsigned char*,int))hl_aptr(arr,vclosure*)[1]->fun)( hl_aptr(arr,vdynamic*)[0], buf, (int)len );
 	if( r == -2 ) return MBEDTLS_ERR_SSL_WANT_READ;
@@ -215,6 +244,7 @@ DEFINE_PRIM(_I32, ssl_handshake, TSSL);
 DEFINE_PRIM(_I32, ssl_session_reset, TSSL);
 DEFINE_PRIM(_VOID, ssl_set_bio, TSSL _DYN);
 DEFINE_PRIM(_VOID, ssl_set_socket, TSSL _SOCK);
+DEFINE_PRIM(_VOID, ssl_set_udp_socket, TSSL _UDP_SOCK);
 DEFINE_PRIM(_VOID, ssl_set_hostname, TSSL _BYTES);
 DEFINE_PRIM(TCERT, ssl_get_peer_certificate, TSSL);
 DEFINE_PRIM(_VOID, ssl_set_timer, TSSL TTIMER);
@@ -782,6 +812,17 @@ DEFINE_PRIM(_BYTES, dgst_make, _BYTES _I32 _BYTES _REF(_I32));
 DEFINE_PRIM(_BYTES, dgst_sign, _BYTES _I32 TPKEY _BYTES _REF(_I32));
 DEFINE_PRIM(_BOOL, dgst_verify, _BYTES _I32 _BYTES _I32 TPKEY _BYTES);
 
+HL_PRIM hl_udp_socket *HL_NAME(udp_socket_new)(hl_socket *socket, int host, int port) {
+	hl_udp_socket *usock = hl_gc_alloc_noptr(sizeof(hl_udp_socket));
+	usock->sock = *socket;
+	usock->peer_addr.sin_family = AF_INET;
+	usock->peer_addr.sin_port = htons((unsigned short)port);
+	usock->peer_addr.sin_addr.s_addr = host;
+	return usock;
+}
+
+DEFINE_PRIM(_UDP_SOCK, udp_socket_new, _SOCK _I32 _I32);
+
 HL_PRIM mbedtls_ssl_cookie_ctx *HL_NAME(cookie_new)() {
 	mbedtls_ssl_cookie_ctx *cookie_ctx = hl_gc_alloc_noptr(sizeof(mbedtls_ssl_cookie_ctx));
 	mbedtls_ssl_cookie_init(cookie_ctx);
@@ -810,7 +851,7 @@ HL_PRIM bool HL_NAME(net_udp_peek)(hl_socket *s, int *host, int *port) {
 	int ret = recvfrom(s->sock, buf, sizeof(buf), MSG_PEEK, (struct sockaddr*)&saddr, &slen);
 	if( ret == SOCKET_ERROR ) {
 #ifdef	HL_WIN
-		if( WSAGetLastError() == WSAECONNRESET )
+		if( WSAGetLastError() == WSAEMSGSIZE )
 			ret = 0;
 		else
 #endif
