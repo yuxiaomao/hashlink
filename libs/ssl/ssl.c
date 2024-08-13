@@ -128,11 +128,17 @@ HL_PRIM int HL_NAME(ssl_handshake)(mbedtls_ssl_context *ssl) {
 		return -1;
 	if( r == MBEDTLS_ERR_SSL_CONN_EOF )
 		return -2;
+	if( r == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED )
+		return -3;
 	if( r != 0 )
 		return ssl_error(r);
 	return 0;
 }
 
+HL_PRIM int HL_NAME(ssl_session_reset)(mbedtls_ssl_context *ssl) {
+	int r = mbedtls_ssl_session_reset(ssl);
+	return r;
+}
 
 static bool is_block_error() {
 #ifdef HL_WIN
@@ -192,7 +198,7 @@ HL_PRIM hl_ssl_cert *HL_NAME(ssl_get_peer_certificate)(mbedtls_ssl_context *ssl)
 }
 
 HL_PRIM void HL_NAME(ssl_set_timer)(mbedtls_ssl_context *ssl, mbedtls_timing_delay_context *timer) {
-	mbedtls_ssl_set_timer_cb(ssl, timer, mbedtls_timing_set_delay,mbedtls_timing_get_delay);
+	mbedtls_ssl_set_timer_cb(ssl, timer, mbedtls_timing_set_delay, mbedtls_timing_get_delay);
 }
 
 HL_PRIM int HL_NAME(ssl_set_client_transport_id)(mbedtls_ssl_context *ssl, const unsigned char *info, int len) {
@@ -203,6 +209,7 @@ HL_PRIM int HL_NAME(ssl_set_client_transport_id)(mbedtls_ssl_context *ssl, const
 DEFINE_PRIM(TSSL, ssl_new, TCONF);
 DEFINE_PRIM(_VOID, ssl_close, TSSL);
 DEFINE_PRIM(_I32, ssl_handshake, TSSL);
+DEFINE_PRIM(_I32, ssl_session_reset, TSSL);
 DEFINE_PRIM(_VOID, ssl_set_bio, TSSL _DYN);
 DEFINE_PRIM(_VOID, ssl_set_socket, TSSL _SOCK);
 DEFINE_PRIM(_VOID, ssl_set_hostname, TSSL _BYTES);
@@ -770,6 +777,26 @@ HL_PRIM mbedtls_timing_delay_context *HL_NAME(timer_new)() {
 }
 
 DEFINE_PRIM(TTIMER, timer_new, _NO_ARG);
+
+HL_PRIM bool HL_NAME(net_udp_peek)(hl_socket *s, int *host, int *port) {
+	struct sockaddr_in saddr;
+	int slen = sizeof(saddr);
+	char buf[1] = { 0 };
+	int ret = recvfrom(s->sock, buf, sizeof(buf), MSG_PEEK, (struct sockaddr*)&saddr, &slen);
+	if( ret == SOCKET_ERROR ) {
+#ifdef	HL_WIN
+		if( WSAGetLastError() == WSAECONNRESET )
+			ret = 0;
+		else
+#endif
+		return false;
+	}
+	*host = *(int*)&saddr.sin_addr;
+	*port = ntohs(saddr.sin_port);
+	return true;
+}
+
+DEFINE_PRIM(_BOOL, net_udp_peek, _SOCK _REF(_I32) _REF(_I32));
 
 #if _MSC_VER
 
