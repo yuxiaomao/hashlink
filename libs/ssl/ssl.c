@@ -54,7 +54,7 @@ typedef struct _hl_socket {
 
 // Udp socket context
 typedef struct _hl_udp_socket {
-	hl_socket sock;
+	SOCKET sock;
 	struct sockaddr_in peer_addr;
 } hl_udp_socket;
 
@@ -191,7 +191,7 @@ HL_PRIM void HL_NAME(ssl_set_socket)(mbedtls_ssl_context *ssl, hl_socket *socket
 static int net_udp_write(void *ctx, const unsigned char *buf, size_t len) {
 	hl_udp_socket *socket = (hl_udp_socket *)ctx;
 	int alen = sizeof(socket->peer_addr);
-	int r = sendto((SOCKET)(int_val)socket->sock.sock, (char *)buf, (int)len, MSG_NOSIGNAL, (struct sockaddr*)&socket->peer_addr, alen);
+	int r = sendto((SOCKET)(int_val)socket->sock, (char *)buf, (int)len, MSG_NOSIGNAL, (struct sockaddr*)&socket->peer_addr, alen);
 	if( r == SOCKET_ERROR ) {
 		if( is_block_error() )
 			return MBEDTLS_ERR_SSL_WANT_WRITE;
@@ -203,14 +203,18 @@ static int net_udp_write(void *ctx, const unsigned char *buf, size_t len) {
 
 static int net_udp_read(void *ctx, unsigned char *buf, size_t len) {
 	hl_udp_socket *socket = (hl_udp_socket *)ctx;
+	struct sockaddr_in addr;
 	int alen = sizeof(socket->peer_addr);
-	int r = recvfrom((SOCKET)(int_val)socket->sock.sock, (char *)buf, (int)len, MSG_NOSIGNAL, (struct sockaddr*)&socket->peer_addr, &alen);
+	int r = recvfrom((SOCKET)(int_val)socket->sock, (char *)buf, (int)len, MSG_NOSIGNAL, (struct sockaddr*)&addr, &alen);
+	if( *(int*)&addr.sin_addr != *(int*)&socket->peer_addr.sin_addr || addr.sin_port != socket->peer_addr.sin_port ) {
+	}
 	if( r == SOCKET_ERROR ) {
 		if( is_block_error() )
 			return MBEDTLS_ERR_SSL_WANT_READ;
 		else if( is_connection_reset_error() )
 			return MBEDTLS_ERR_SSL_CONN_EOF;
 	}
+	// MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL
 	return r;
 }
 
@@ -221,7 +225,7 @@ static int net_udp_read_timeout(void *ctx, unsigned char *buf, size_t len, uint3
 	tv.tv_usec = (timeout % 1000) * 1000;
 
 	fd_set read_fds;
-	int fd = socket->sock.sock;
+	int fd = socket->sock;
 	FD_ZERO(&read_fds);
 	FD_SET((SOCKET) fd, &read_fds);
 
@@ -861,23 +865,11 @@ DEFINE_PRIM(_BOOL, dgst_verify, _BYTES _I32 _BYTES _I32 TPKEY _BYTES);
 
 HL_PRIM hl_udp_socket *HL_NAME(udp_socket_new)(hl_socket *socket, int host, int port) {
 	hl_udp_socket *usock = hl_gc_alloc_noptr(sizeof(hl_udp_socket));
-	usock->sock = *socket;
+	usock->sock = socket->sock;
 	usock->peer_addr.sin_family = AF_INET;
 	usock->peer_addr.sin_port = htons((unsigned short)port);
 	usock->peer_addr.sin_addr.s_addr = host;
 	return usock;
-}
-
-HL_PRIM bool HL_NAME(udp_socket_bind)(hl_socket *s, int host, int port) {
-	struct sockaddr_in addr;
-	if( !s ) return false;
-	memset(&addr,0,sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons((unsigned short)port);
-	*(int*)&addr.sin_addr.s_addr = host;
-	int opt = 1;
-	setsockopt(s->sock,SOL_SOCKET,SO_REUSEADDR,(char*)&opt,sizeof(opt));
-	return bind(s->sock,(struct sockaddr*)&addr,sizeof(addr)) != SOCKET_ERROR;
 }
 
 static bool udp_socket_peek(hl_socket *s, int *host, int *port, struct sockaddr_in* client_addr, int alen) {
@@ -906,42 +898,10 @@ HL_PRIM hl_socket *HL_NAME(udp_socket_accept)(hl_socket *s, int *host, int *port
 		return NULL;
 
 	return s; // TODO remove
-
-	// Hijack socket
-	if (connect(s->sock, (struct sockaddr *) &client_addr, alen) != 0) {
-		return NULL;
-	}
-
-	SOCKET cs = s->sock;
-	s->sock = -1; // In case we exit early? But maybe we'd like the old one remains?
-
-	struct sockaddr_storage local_addr;
-	alen = sizeof(struct sockaddr_storage);
-	if (getsockname(cs, (struct sockaddr *)&local_addr, &alen) != 0) {
-		return NULL;
-	}
-	int ret = (int)socket(AF_INET, SOCK_DGRAM, 0);
-	if (ret < 0) {
-		return NULL;
-	}
-	s->sock = ret;
-	int one = 1;
-	if (setsockopt(s->sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one)) != 0) {
-		return NULL;
-	}
-	if (bind(s->sock, (struct sockaddr *)&local_addr, alen) != 0) {
-		return NULL;
-	}
-
-	hl_socket* client_socket = (hl_socket*)hl_gc_alloc_noptr(sizeof(hl_socket));
-	client_socket->sock = cs;
-	return client_socket;
-	//return s;
 }
 
 
 DEFINE_PRIM(_UDP_SOCK, udp_socket_new, _SOCK _I32 _I32);
-DEFINE_PRIM(_BOOL, udp_socket_bind, _SOCK _I32 _I32);
 DEFINE_PRIM(_SOCK, udp_socket_accept, _SOCK _REF(_I32) _REF(_I32));
 
 HL_PRIM mbedtls_ssl_cookie_ctx *HL_NAME(cookie_new)() {
